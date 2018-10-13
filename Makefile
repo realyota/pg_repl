@@ -4,7 +4,7 @@ EXTENSION = ddl_repl
 DATA = ddl_repl--1.0.sql
 REGRESS = ddl_repl
 
-PG_CPPFLAGS = -I/usr/pgsql-9.6/include
+PG_CPPFLAGS = -lpq
 
 ifdef NO_PGXS
 subdir = contrib/ddl_repl
@@ -16,5 +16,4 @@ PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 endif
-
 
