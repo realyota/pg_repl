@@ -1,0 +1,164 @@
+-- ===================================================================
+-- create ddl_repl extension
+-- ===================================================================
+CREATE EXTENSION ddl_repl;
+
+-- ===================================================================
+-- node managing
+-- ===================================================================
+select ddl_repl.create_node(
+  'PostgreSQL 2',
+  'dbname=postgres host=localhost user=postgres password=postgres port=5433'
+);
+ create_node 
+--------------------------
+ 
+(1 row)
+
+-- try to add existing node
+select ddl_repl.create_node(
+  'PostgreSQL 2',
+  'dbname=postgres host=localhost user=postgres password=postgres port=5433'
+);
+ERROR:  Node PostgreSQL 2 already exists
+CONTEXT:  PL/pgSQL function ddl_repl.create_node(text,text,boolean), line 12 at RAISE
+
+-- add another
+select ddl_repl.create_node(
+  'PostgreSQL 3',
+  'dbname=postgres host=localhost user=postgres password=postgres port=5434'
+);
+ create_node 
+--------------------------
+ 
+(1 row)
+-- check if added
+SELECT node_name, dsn, active, description from ddl_repl.nodes;
+  node_name   |                                   dsn                                    | active | description
+--------------+--------------------------------------------------------------------------+--------+-------------
+ PostgreSQL 2 | dbname=postgres host=localhost user=postgres password=postgres port=5433 | t      |
+ PostgreSQL 3 | dbname=postgres host=localhost user=postgres password=postgres port=5434 | t      |
+(2 rows)
+
+-- remove last node
+select ddl_repl.drop_node('PostgreSQL 3'); 
+ drop_node
+-----------
+
+(1 row)
+
+-- check results
+SELECT node_name, dsn, active, description from ddl_repl.nodes;
+  node_name   |                                   dsn                                    | active | description
+--------------+--------------------------------------------------------------------------+--------+-------------
+ PostgreSQL 2 | dbname=postgres host=localhost user=postgres password=postgres port=5433 | t      |
+(1 row)
+
+-- ===================================================================
+-- DDL/DCL command replication
+-- ===================================================================
+
+-- user creation
+CREATE USER test with password 'test';
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE ROLE
+
+GRANT SELECT ON pg_stat_activity TO test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+GRANT
+
+GRANT SELECT ON ddl_repl.nodes TO test;
+ERROR:  ddl_repl: Node PostgreSQL 2 query failed ERROR:  schema "ddl_repl" does not exist
+
+CREATE SCHEMA test authorization test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE SCHEMA
+
+CREATE TABLE test.test ( a int, b int);
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE TABLE
+
+GRANT ALL ON test.test TO test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+GRANT
+
+CREATE INDEX test_idx ON  test.test(a,b);
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE INDEX
+
+CREATE TYPE test.test_type AS ENUM ('This', 'Is', 'A', 'Test');
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE TYPE
+
+CREATE VIEW test.v_test AS
+SELECT 1 x, 2 y, a, b FROM test.test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE VIEW
+
+-- alter statements
+ALTER TABLE test.test add c int not null default 0;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+ALTER TABLE
+
+ALTER VIEW test.v_test RENAME to v_test_renamed;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+ALTER VIEW
+
+-- revoking
+REVOKE ALL ON test.test FROM test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+REVOKE
+
+-- function
+CREATE FUNCTION test.f_test (a int, b int)
+RETURNS int
+AS
+$function$
+begin
+  return a+b;
+end;
+$function$
+language plpgsql;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+CREATE FUNCTION
+
+-- user drop
+DROP USER test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DROP ROLE
+
+DROP FUNCTION test.f_test(int, int);
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DROP FUNCTION
+
+DROP VIEW test.v_test_renamed;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DROP VIEW
+
+DROP TABLE test.test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DROP TABLE
+
+DROP TYPE test.test_type;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DROP TYPE
+
+DROP SCHEMA test;
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DROP SCHEMA
+
+-- ===================================================================
+-- plpgsql anonymous block test
+-- ===================================================================
+
+DO $$
+BEGIN
+	PERFORM pg_sleep(1);
+	CREATE SCHEMA test AUTHORIZATION postgres;
+	CREATE TABLE test.test (a int, b int);
+END;
+$$;
+NOTICE:  ddl_repl: not a ddl_repl working
+NOTICE:  ddl_repl: not a ddl_repl working
+NOTICE:  ddl_repl: query replicated to node PostgreSQL 2
+DO

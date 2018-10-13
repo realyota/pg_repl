@@ -1,5 +1,5 @@
 # ddl_repl extension
+# path: share\postgresql\extension
 comment = 'Replicate DDL/DDC commands across cluster'
 default_version = '1.0'
-relocatable = true
-module_pathname = '$libdir/ddl_repl'
+#module_pathname = '$libdir/ddl_repl'
