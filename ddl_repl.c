@@ -46,6 +46,8 @@ typedef struct CachedConnEntry
 	PGconn	   *conn;
 } CachedConnEntry;
 
+bool hasContextQuery;
+
 /* GUC variables */
 static bool ddl_repl_enabled;        /* whether replicate ddl commands across cluster */
 static bool distributed_transaction;
@@ -56,7 +58,8 @@ static bool only_repl_users;
 
 PGDLLEXPORT void _PG_init(void);
 PGDLLEXPORT void _PG_fini(void);
-static void InitializeHashedConnecions();
+static void InitializeHashedConnections();
+void ProcessQueryLogic(const char *queryString);
 
 /* Hooks for DCL commands */
 static ProcessUtility_hook_type next_ProcessUtility_hook = NULL;
@@ -67,6 +70,8 @@ static void ddl_repl_ProcessUtility_hook(Node *parsetree, const char *queryStrin
 
 /* Connection cache */
 static HTAB *Connections = NULL;
+
+const DEF_DEBUG_NOTICE = NOTICE;
 
 /*
 * Module load callback
@@ -149,12 +154,13 @@ void _PG_init(void)
 static void RemoveHashedConnection(char *node_name)
 {
 	CachedConnEntry *entry;
-	CachedConnKey   key;
+	char    	*key;
 	bool	     	found;
 
-	key.node_name = node_name;
+        key = pstrdup(node_name);
+        truncate_identifier(key, strlen(key), false);
 
-	entry = hash_search(Connections, (void *) &key, HASH_ENTER, &found);
+	entry = hash_search(Connections, (void *) key, HASH_REMOVE, &found);
 
 	if (found)
 		entry->conn = NULL;
@@ -167,7 +173,7 @@ static void RemoveHashedConnection(char *node_name)
 * hash structure can be used to achieve this goal, thanks to PostgreSQL developers
 * we do not need to code it separetly, just use build-in functions.
 */
-static void InitializeHashedConnecions()
+static void InitializeHashedConnections()
 {
 	if (Connections == NULL)
 	{
@@ -196,20 +202,19 @@ PGconn * GetConnection(const char *node_name)
 	key = pstrdup(node_name);
 	truncate_identifier(key, strlen(key), false);
 
-	int			num_categories = hash_get_num_entries(Connections);
-	//elog(NOTICE, "ddl_repl: Connections hash count is %d", num_categories);
+	int num_categories = hash_get_num_entries(Connections);	
 
-	//if (num_categories > 0 && Connections)
-	//{
-	//	elog(NOTICE, "ddl_repl: Connections hash key Starting iterating");
-	//	hash_seq_init(&status, Connections);
-	//}
+	if (num_categories > 0 && Connections)
+	{		
+ 		hash_seq_init(&status, Connections);
+	}
 
 	entry = (CachedConnEntry*) hash_search(Connections, key, HASH_FIND, NULL);
-	if (entry) 
+	if (entry) { 		
 		return entry->conn;
-	 else 
+	} else { 		
 		return NULL;	
+    }
 }
 
 /*
@@ -220,7 +225,7 @@ PGconn * GetConnection(const char *node_name)
 PGconn * CreateConnection(const char *dsn)
 {
 	/* connect to node using libpq */
-	PGconn *conn = PQconnectdb(dsn);
+	PGconn *conn = PQconnectdb(dsn);	
 
 	/* connection to node fails - do not proceed when we need cluster consistency */
 	return conn;
@@ -235,8 +240,7 @@ PGconn * CreateAndSaveConnection(const char *node_name, const char *dsn)
 	bool	     	found;
 
 	key = pstrdup(node_name);
-	truncate_identifier(key, strlen(key), true);
-	//elog(NOTICE, "ddl_repl: connection to node %s not found - creating one... key is %s", node_name, key);
+	truncate_identifier(key, strlen(key), true);	
 
 	entry = hash_search(Connections, key, HASH_ENTER, &found);
 
@@ -245,7 +249,7 @@ PGconn * CreateAndSaveConnection(const char *node_name, const char *dsn)
 
 	conn = CreateConnection(dsn);
 	entry->conn = conn;   
-	strlcpy(entry->key,node_name,sizeof(entry->key));
+	strlcpy(entry->key,node_name,sizeof(entry->key));     
 
 	return conn;
 }
@@ -257,134 +261,212 @@ static void ddl_repl_ProcessUtility_hook(Node *parsetree,
 	DestReceiver *dest,
 	char *completionTag)
 {	
-	int DEF_DEBUG_NOTICE = NOTICE;
-	PG_TRY();
-	{
-		/* process any hooks before processing ddl replication */
-		if (prev_ProcessUtility_hook)
-			(*prev_ProcessUtility_hook) (parsetree, queryString, context, params,
+    
+	if  (
+	      ddl_repl_enabled &&
+			!(IsA(parsetree, VariableSetStmt) ||
+			IsA(parsetree, ExecuteStmt) ||
+			IsA(parsetree, PrepareStmt) ||
+			IsA(parsetree, DeallocateStmt) ||
+			IsA(parsetree, VariableShowStmt) ||
+			strcmp(queryString, "BEGIN") == 0)				
+	    )
+	{   
+	
+       						
+		/* main extension logic */
+		PG_TRY();
+		{  	
+			InitializeHashedConnections();		
+			
+			if (context == PROCESS_UTILITY_QUERY)
+				OpenConnections();
+		
+		
+			if (prev_ProcessUtility_hook)
+				prev_ProcessUtility_hook (parsetree, queryString, context, params,
+					dest, completionTag);
+			else
+				standard_ProcessUtility(parsetree, queryString, context, params,
+					dest, completionTag);						
+						
+			if (context == PROCESS_UTILITY_QUERY)
+		 	   hasContextQuery = true;
+			
+			if ((!hasContextQuery && context == PROCESS_UTILITY_TOPLEVEL)  ||  context == PROCESS_UTILITY_QUERY) {
+				ProcessQueryLogic(queryString);
+			}
+				
+			if (context == PROCESS_UTILITY_TOPLEVEL) {			   
+				CloseConnections();				 
+				hasContextQuery = false;
+			}
+		}
+		PG_CATCH();
+		{
+			Rollback();
+			PG_RE_THROW();
+		}
+		PG_END_TRY();					
+	} else 
+	    if (prev_ProcessUtility_hook)
+			prev_ProcessUtility_hook (parsetree, queryString, context, params,
 				dest, completionTag);
 		else
 			standard_ProcessUtility(parsetree, queryString, context, params,
-				dest, completionTag);
-
-		/* execute only when ddl_repl extension is enabled
-			skip SET statements as they are irrelevant also... */
-			if (ddl_repl_enabled && context == PROCESS_UTILITY_TOPLEVEL &&
-				!(IsA(parsetree, VariableSetStmt) ||
-				IsA(parsetree, ExecuteStmt) ||
-				IsA(parsetree, PrepareStmt) ||
-				IsA(parsetree, DeallocateStmt) ||
-				IsA(parsetree, VariableShowStmt) ||
-				strcmp(queryString, "BEGIN") == 0) 
-				)
-			{
-				InitializeHashedConnecions();
-				/* connect to the database using Server Programming Interface */
-				if (SPI_connect() == SPI_OK_CONNECT)
-				{
-					/* select available cluster nodes */
-					int spi_result = SPI_execute("SELECT node_name, dsn FROM ddl_repl.nodes WHERE active IS TRUE", false, 0);
-
-					/* save how many records were fetched */
-					uint64 available_nodes_count = SPI_processed;
-
-					//elog(DEF_DEBUG_NOTICE, "ddl_repl: node count to replicate command: %d", SPI_processed);
-
-					/* if any rows where fetched process cluster ddl replication */
-					if (available_nodes_count > 0 && SPI_tuptable != NULL)
-					{
-						/* get SPI variables */
-						TupleDesc tupdesc = SPI_tuptable->tupdesc;
-						SPITupleTable *tuptable = SPI_tuptable;
-						uint64 j;
-						
-						for (j = 0; j < available_nodes_count; j++)
-						{
-							/* get current row heap */
-							HeapTuple tuple = tuptable->vals[j];
-
-							/* get current row values */
-							char *node_name = SPI_getvalue(tuple, tupdesc, 1);
-							char *node_dsn = SPI_getvalue(tuple, tupdesc, 2);
-
-							//elog(DEF_DEBUG_NOTICE, "ddl_repl: processing node %s", node_name);
-
-							/* connect to node using libpq */
-							//PGconn *conn = CreateOrGetConnection(node_name, node_dsn);
-							PGconn *conn = GetConnection(node_name);
-
-							if (conn == NULL && strcmp(queryString, "BEGIN") == 0) {
-								conn = CreateAndSaveConnection(node_name, node_dsn);
-								PGresult *res = PQexec(conn, "BEGIN");
-								//elog(DEF_DEBUG_NOTICE, "ddl_repl: Sending \"%s\" to node %s", queryString, node_name);
-							}
-							else
-								conn = CreateConnection(node_dsn);
-
-							/* TODO: add extra connection options
-							keywords[n] = "fallback_application_name";
-							values[n] = "postgres_fdw";
-							n++;
-							*/
-
-							/* connection to node fails - do not proceed when we need cluster consistency */
-							if (PQstatus(conn) != CONNECTION_OK)
-							{
-								elog(ERROR, "ddl_repl: Node %s Connection to database failed: %s", node_name, PQerrorMessage(conn));
-								PQfinish(conn);
-							}
-
-							//elog(DEF_DEBUG_NOTICE, "ddl_repl: connected to node %s", node_name);
-
-							/* push query to node */
-							//elog(DEF_DEBUG_NOTICE, "ddl_repl: sending query %s", queryString);
-
-							//if (PQresultStatus(res) != PGRES_COMMAND_OK)
-							//{
-							//	fprintf(stderr, "ddl_repl: BEGIN command failed: %s", PQerrorMessage(conn));
-							//	PQclear(res);
-							//	PQfinish(conn);
-							//}
-							//PQclear(res);
-
-							PGresult *res = PQexec(conn, queryString);
-							if (PQresultStatus(res) != PGRES_COMMAND_OK)
-							{
-								elog(ERROR, "ddl_repl: Node %s query failed %s", node_name, PQerrorMessage(conn));
-								PQclear(res);
-								//PQfinish(conn);
-							}
-							elog(DEF_DEBUG_NOTICE, "ddl_repl: query replicated to node %s", node_name);
-							PQclear(res);
-							
-							if (strcmp(queryString, "COMMIT") == 0 || GetConnection(node_name) == NULL) {
-								//elog(DEF_DEBUG_NOTICE, "ddl_repl: finishing connection to node %s", node_name);
-								PQfinish(conn);
-								RemoveHashedConnection(node_name);
-							}
-						}
-					}
-					else elog(DEF_DEBUG_NOTICE, "ddl_repl: there is no nodes to replicate command");
-
-					/* close SPI connection in the end */
-					SPI_finish();
-				}
-				else elog(ERROR, "ddl_repl: could not connect using SPI");
-			}
-			else elog(NOTICE, "ddl_repl: not a ddl_repl working");
-
-	}
-	PG_CATCH();
-	{
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	/*
-		wyj¹tki do obs³u¿enia:
-		   - create extension ->nie przenosiæ jeœli query string == /* ../../.sql
-	*/
+				dest, completionTag);	
 	
+}
+
+/* TODO: DRY! */
+void Rollback()
+{
+	HASH_SEQ_STATUS status;
+	CachedConnEntry *entry;
+	
+	// LWLockAcquire???
+	
+	hash_seq_init(&status, Connections);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{		
+		if (entry) {			
+			PGresult *res = PQexec(entry->conn, "ROLLBACK");			
+			if (PQresultStatus(res) != PGRES_COMMAND_OK) 
+			{				
+				PQfinish(entry->conn);
+				RemoveHashedConnection(entry->key);					
+				elog(ERROR, "ddl_repl: Node %s query failed %s", entry->key, PQerrorMessage(entry->conn));					
+			} else
+			  elog(NOTICE, "ddl_repl: rollback send to %s", entry->key, PQerrorMessage(entry->conn));		
+			  
+			PQfinish(entry->conn);
+			RemoveHashedConnection(entry->key);
+		}
+	}		
+}
+
+void CloseConnections() 
+{
+	HASH_SEQ_STATUS status;
+	CachedConnEntry *entry;
+	
+	// LWLockAcquire???
+	
+	hash_seq_init(&status, Connections);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{		
+		if (entry) {			
+			PGresult *res = PQexec(entry->conn, "COMMIT");			
+			if (PQresultStatus(res) != PGRES_COMMAND_OK) 
+			{				
+				PQfinish(entry->conn);
+				RemoveHashedConnection(entry->key);					
+				elog(ERROR, "ddl_repl: Node %s query failed %s", entry->key, PQerrorMessage(entry->conn));					
+			} else
+			  elog(NOTICE, "ddl_repl: commit send to %s", entry->key, PQerrorMessage(entry->conn));		
+			  
+			PQfinish(entry->conn);
+			RemoveHashedConnection(entry->key);
+		}
+	}	
+}
+
+void OpenConnections() 
+{
+/* connect to the database using Server Programming Interface */
+	if (SPI_connect() == SPI_OK_CONNECT)
+	{
+		/* select available cluster nodes */
+		int spi_result = SPI_execute("SELECT node_name, dsn FROM ddl_repl.nodes WHERE active IS TRUE", false, 0);
+
+		/* save how many records were fetched */
+		uint64 available_nodes_count = SPI_processed;
+
+		//elog(DEF_DEBUG_NOTICE, "ddl_repl: node count to replicate command: %d", SPI_processed);
+
+		/* if any rows where fetched process cluster ddl replication */
+		if (available_nodes_count > 0 && SPI_tuptable != NULL)
+		{
+			/* get SPI variables */
+			TupleDesc tupdesc = SPI_tuptable->tupdesc;
+			SPITupleTable *tuptable = SPI_tuptable;
+			uint64 j;
+			
+			for (j = 0; j < available_nodes_count; j++)
+			{
+
+				/* get current row heap */
+				HeapTuple tuple = tuptable->vals[j];
+
+				/* get current row values */
+				char *node_name = SPI_getvalue(tuple, tupdesc, 1);
+				char *node_dsn = SPI_getvalue(tuple, tupdesc, 2);
+
+				/* connect to node using libpq */				
+				PGconn *conn = GetConnection(node_name);
+
+				if (conn == NULL) 
+					conn = CreateAndSaveConnection(node_name, node_dsn);									
+					
+				PGresult *res = PQexec(conn, "BEGIN");
+				if (PQresultStatus(res) != PGRES_COMMAND_OK)
+				{
+					elog(ERROR, "ddl_repl: Node %s query failed %s", node_name, PQerrorMessage(conn));					
+					PQfinish(conn);
+					RemoveHashedConnection(node_name);					
+				} 
+			}
+		
+		}
+		else elog(DEF_DEBUG_NOTICE, "ddl_repl: there is no nodes to replicate command");
+
+	  /* close SPI connection in the end */
+		SPI_finish();
+							
+	}
+	else elog(ERROR, "ddl_repl: could not connect using SPI");
+}
+
+void ProcessQueryLogic(const char *queryString) 
+{
+	
+	HASH_SEQ_STATUS status;
+	CachedConnEntry *entry;
+	
+	// LWLockAcquire???
+	
+	hash_seq_init(&status, Connections);		
+	
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{					
+		if (entry) 
+		{			
+			PGconn *conn = entry->conn;
+			/* TODO: add extra connection options
+				keywords[n] = "fallback_application_name";
+				values[n] = "postgres_fdw";
+				n++;
+			*/		
+			/* connection to node fails - do not proceed when we need cluster consistency */
+			if (PQstatus(conn) != CONNECTION_OK)
+			{
+				elog(ERROR, "ddl_repl: Node %s Connection to database failed: %s", entry->key, PQerrorMessage(conn));
+				PQfinish(conn);
+			}				
+
+			/* push query to node */		
+			PGresult *res = PQexec(conn, queryString);				
+
+			if (PQresultStatus(res) != PGRES_COMMAND_OK) 
+			{
+				elog(ERROR, "ddl_repl: Node %s query failed %s", entry->key, PQerrorMessage(conn));					
+				PQfinish(conn);
+				RemoveHashedConnection(entry->key);		
+			} else
+				elog(DEF_DEBUG_NOTICE, "ddl_repl: query replicated to node %s", entry->key);					                                                     
+			PQclear(res);			
+		}
+	}	
 }
 
 /*
