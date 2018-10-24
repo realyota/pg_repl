@@ -46,7 +46,7 @@ typedef struct CachedConnEntry
 	PGconn	   *conn;
 } CachedConnEntry;
 
-bool hasContextQuery;
+bool hasContextQuery = false;
 
 /* GUC variables */
 static bool ddl_repl_enabled;        /* whether replicate ddl commands across cluster */
@@ -271,15 +271,14 @@ static void ddl_repl_ProcessUtility_hook(Node *parsetree,
 			IsA(parsetree, VariableShowStmt) ||
 			strcmp(queryString, "BEGIN") == 0)				
 	    )
-	{   
-	
-       						
+	{        				
+        		
 		/* main extension logic */
 		PG_TRY();
 		{  	
 			InitializeHashedConnections();		
 			
-			if (context == PROCESS_UTILITY_QUERY)
+			if (context == PROCESS_UTILITY_TOPLEVEL)
 				OpenConnections();
 		
 		
@@ -288,16 +287,17 @@ static void ddl_repl_ProcessUtility_hook(Node *parsetree,
 					dest, completionTag);
 			else
 				standard_ProcessUtility(parsetree, queryString, context, params,
-					dest, completionTag);						
+					dest, completionTag);	 					
 						
 			if (context == PROCESS_UTILITY_QUERY)
-		 	   hasContextQuery = true;
+		 	   hasContextQuery = true; 						   
 			
-			if ((!hasContextQuery && context == PROCESS_UTILITY_TOPLEVEL)  ||  context == PROCESS_UTILITY_QUERY) {
+			
+			if ((!hasContextQuery && context == PROCESS_UTILITY_TOPLEVEL)  ||  context == PROCESS_UTILITY_QUERY) {			    
 				ProcessQueryLogic(queryString);
 			}
 				
-			if (context == PROCESS_UTILITY_TOPLEVEL) {			   
+			if (context == PROCESS_UTILITY_TOPLEVEL) {			   			    
 				CloseConnections();				 
 				hasContextQuery = false;
 			}
