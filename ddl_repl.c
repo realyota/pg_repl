@@ -276,28 +276,42 @@ static void ddl_repl_ProcessUtility_hook(Node *parsetree,
 		/* main extension logic */
 		PG_TRY();
 		{  	
-			InitializeHashedConnections();		
+			InitializeHashedConnections();			
 			
-			if (context == PROCESS_UTILITY_TOPLEVEL)
-				OpenConnections();
-		
 		
 			if (prev_ProcessUtility_hook)
 				prev_ProcessUtility_hook (parsetree, queryString, context, params,
 					dest, completionTag);
 			else
 				standard_ProcessUtility(parsetree, queryString, context, params,
-					dest, completionTag);	 					
+					dest, completionTag);	 			
 						
-			if (context == PROCESS_UTILITY_QUERY)
-		 	   hasContextQuery = true; 						   
+			if (context == PROCESS_UTILITY_QUERY) 
+			{
+				hasContextQuery = true; 								   
+			}	
 			
+			if ( 
+			      context == PROCESS_UTILITY_TOPLEVEL &&
+			      (
+     				  hasContextQuery ||
+			          (!hasContextQuery && !IsA(parsetree, DoStmt))
+				  )
+			   )
+			{								
+				OpenConnections();	
+			}			
+	
 			
-			if ((!hasContextQuery && context == PROCESS_UTILITY_TOPLEVEL)  ||  context == PROCESS_UTILITY_QUERY) {			    
+			if ((hasContextQuery && context == PROCESS_UTILITY_TOPLEVEL) ||
+		        (!hasContextQuery && context == PROCESS_UTILITY_TOPLEVEL && !IsA(parsetree, DoStmt)) ||
+				(context == PROCESS_UTILITY_QUERY))
+			{			 
 				ProcessQueryLogic(queryString);
 			}
 				
-			if (context == PROCESS_UTILITY_TOPLEVEL) {			   			    
+			if (context == PROCESS_UTILITY_TOPLEVEL) 
+			{	
 				CloseConnections();				 
 				hasContextQuery = false;
 			}
@@ -368,7 +382,7 @@ void CloseConnections()
 			PQfinish(entry->conn);
 			RemoveHashedConnection(entry->key);
 		}
-	}	
+	}		
 }
 
 void OpenConnections() 
@@ -420,8 +434,8 @@ void OpenConnections()
 		}
 		else elog(DEF_DEBUG_NOTICE, "ddl_repl: there is no nodes to replicate command");
 
-	  /* close SPI connection in the end */
-		SPI_finish();
+		/* close SPI connection in the end */
+		SPI_finish();		
 							
 	}
 	else elog(ERROR, "ddl_repl: could not connect using SPI");
